@@ -1,1 +1,10 @@
 dataset/
+# Python & Data ignores
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+*.csv
+*.pt
+*.png
