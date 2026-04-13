@@ -6,7 +6,7 @@ class DemandPredictor(nn.Module):
     [Step 2] 需求预测神经网络 (A同学负责)
     使用 LSTM 或其他时间序列模型预测未来的需求量 y_{it}
     """
-    def __init__(self, input_size: int, hidden_size: int, num_layers: int = 4, output_size: int = 1):
+    def __init__(self, input_size: int, hidden_size: int, num_layers: int = 4, output_size: int = 1, use_category_embedding: bool = True, embedding_dim: int = 16):
         """
         初始化 DemandPredictor 模型。
         
@@ -15,12 +15,20 @@ class DemandPredictor(nn.Module):
             hidden_size (int): LSTM 隐藏层维度（默认为 512）
             num_layers (int): LSTM 层数（默认为 4）
             output_size (int): 预测输出维度（默认为 1）
+            use_category_embedding (bool): 是否使用类别特征 Embedding（默认为 True）
+            embedding_dim (int): 类别特征 Embedding 维度（默认为 16）
         """
         super(DemandPredictor, self).__init__()
         
         self.num_layers = num_layers
         self.hidden_size = hidden_size
+        self.use_category_embedding = use_category_embedding
         
+        if self.use_category_embedding:
+            # 4种类别: smooth, erratic, intermittent, lumpy
+            self.category_emb = nn.Embedding(num_embeddings=4, embedding_dim=embedding_dim)
+            input_size += embedding_dim
+            
         # 多层 LSTM 用于提取时间序列特征，加入 Dropout 防止过拟合
         self.lstm = nn.LSTM(
             input_size=input_size, 
@@ -42,17 +50,31 @@ class DemandPredictor(nn.Module):
         self.fc3 = nn.Linear(128, output_size)
         self.relu = nn.ReLU()
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, category_idx: torch.Tensor = None) -> torch.Tensor:
         """
         前向传播计算预测需求量
         
         参数:
             x (torch.Tensor): 输入特征张量, 形状 (batch_size, seq_len, input_size) 
                               或 (batch_size, input_size)
+            category_idx (torch.Tensor): 类别索引特征, 形状 (batch_size,)
             
         返回:
             y_pred (torch.Tensor): 预测的需求量, 形状 (batch_size, output_size)
         """
+        if self.use_category_embedding and category_idx is not None:
+            # emb: (batch_size, embedding_dim)
+            emb = self.category_emb(category_idx)
+            
+            if len(x.shape) == 2:
+                # x 形状为 (batch_size, input_size)，直接在特征维度拼接
+                x = torch.cat([x, emb], dim=-1)
+            elif len(x.shape) == 3:
+                # x 形状为 (batch_size, seq_len, input_size)
+                # 扩展 emb 的序列维度: (batch_size, 1, embedding_dim) -> (batch_size, seq_len, embedding_dim)
+                emb_expanded = emb.unsqueeze(1).expand(-1, x.shape[1], -1)
+                x = torch.cat([x, emb_expanded], dim=-1)
+
         # 如果输入没有序列维度，则扩展一维: (batch_size, input_size) -> (batch_size, 1, input_size)
         if len(x.shape) == 2:
             x = x.unsqueeze(1)

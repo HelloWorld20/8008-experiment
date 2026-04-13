@@ -1,4 +1,5 @@
 import os
+import argparse
 import torch
 from data.dataset import get_dataloader
 from model.lstm import DemandPredictor
@@ -12,6 +13,10 @@ def main():
     Predict-and-Optimize 框架全局入口文件
     负责初始化所有模块并启动端到端训练流水线。
     """
+    parser = argparse.ArgumentParser(description="End-to-End Predict-and-Optimize Training")
+    parser.add_argument('--epochs', type=int, default=10, help='epochs数量 (default: 10)')
+    args = parser.parse_args()
+
     print("Initializing Project Components...")
     
     # 1. 初始化 DataLoader
@@ -32,14 +37,14 @@ def main():
     surrogate = SurrogateModel()
     
     # 5. 启动端到端训练循环 (C同学统筹)
-    print("Starting End-to-End Predict-and-Optimize Training Loop...")
+    print(f"Starting End-to-End Predict-and-Optimize Training Loop for {args.epochs} epochs...")
     train_predict_and_optimize(
         dataloader=dataloader,
         predictor=predictor,
         solver=solver,
         env=env,
         surrogate=surrogate,
-        epochs=10
+        epochs=args.epochs
     )
 
 if __name__ == "__main__":

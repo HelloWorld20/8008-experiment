@@ -26,13 +26,13 @@ def train_predict_and_optimize(
     history_true_cost = []
     
     for epoch in range(epochs):
-        for batch_idx, (features, true_demand, cost_params_dict) in enumerate(dataloader):
+        for batch_idx, (features, category_idx, true_demand, cost_params_dict) in enumerate(dataloader):
             
             # ==========================================================
             # [Step 2] 前向预测 (A)
             # ==========================================================
             optimizer.zero_grad()
-            y_pred_tensor = predictor(features)  # 预测未来的需求 y_it
+            y_pred_tensor = predictor(features, category_idx)  # 预测未来的需求 y_it
             
             # 包装为接口类
             y_pred_np = y_pred_tensor.detach().cpu().numpy().flatten()

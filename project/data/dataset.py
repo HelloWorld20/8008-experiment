@@ -8,6 +8,7 @@ from typing import Tuple, List
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from interfaces import SKUCostParams
+from data.category import compute_adi, compute_cv2, classify_type
 
 class M5InventoryDataset(Dataset):
     """
@@ -53,20 +54,37 @@ class M5InventoryDataset(Dataset):
         print("Pre-calculating average prices per SKU-Store...")
         self.avg_prices = self.prices_df.groupby(['item_id', 'store_id'])['sell_price'].mean().to_dict()
 
+        print("Classifying data types based on ADI and CV2...")
+        # Calculate ADI and CV2 for each SKU based on historical sales
+        def calculate_category(row_sales):
+            adi = compute_adi(row_sales)
+            cv2 = compute_cv2(row_sales)
+            return classify_type(adi, cv2)
+            
+        # We only use historical sales columns for this calculation
+        sales_only = self.sales_df[self.d_cols].values
+        # Using numpy array calculation for speed instead of pandas apply
+        categories = []
+        for i in range(sales_only.shape[0]):
+            categories.append(calculate_category(sales_only[i]))
+        self.sales_df['category_idx'] = categories
+
         print(f"Dataset initialized with {len(self.sales_df)} SKUs.")
 
     def __len__(self) -> int:
         return len(self.sales_df)
         
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, SKUCostParams]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, SKUCostParams]:
         """
         获取单条(单个 SKU 或一个 Batch SKU)的数据
+        返回: (features, category_idx, true_demand, cost_params)
         """
         row = self.sales_df.iloc[idx]
         
         item_id = row['item_id']
         store_id = row['store_id']
         cat_id = row['cat_id']
+        category_idx = torch.tensor(row['category_idx'], dtype=torch.long)
         
         # 1. 提取输入特征 (过去 seq_len 天的销量)
         feature_start_idx = self.target_day_idx - self.seq_len
@@ -115,7 +133,7 @@ class M5InventoryDataset(Dataset):
             p_i=float(p_i)
         )
         
-        return features, true_demand, cost_params
+        return features, category_idx, true_demand, cost_params
 
 def get_dataloader(data_path: str, batch_size: int = 32, mode: str = 'train') -> DataLoader:
     """
@@ -127,10 +145,11 @@ def get_dataloader(data_path: str, batch_size: int = 32, mode: str = 'train') ->
     # 自定义 collate_fn 因为 DataLoader 默认无法直接把 List[SKUCostParams] 给 stack 起来
     def custom_collate(batch):
         features = torch.stack([item[0] for item in batch])
-        demands = torch.stack([item[1] for item in batch])
+        category_idx = torch.stack([item[1] for item in batch])
+        demands = torch.stack([item[2] for item in batch])
         # 将多个 dataclass 直接放在列表中
-        cost_params_list = [item[2] for item in batch]
-        return features, demands, cost_params_list
+        cost_params_list = [item[3] for item in batch]
+        return features, category_idx, demands, cost_params_list
 
     if not os.path.exists(sales_path):
         print(f"Warning: Real dataset not found at {sales_path}. Using Dummy Dataset for testing.")
@@ -138,12 +157,13 @@ def get_dataloader(data_path: str, batch_size: int = 32, mode: str = 'train') ->
             def __len__(self): return 100
             def __getitem__(self, idx):
                 features = torch.randn(28)
+                category_idx = torch.randint(0, 4, (1,)).squeeze()
                 true_demand = torch.tensor([5.0])
                 cost_params = SKUCostParams(
                     item_id=f"dummy_{idx}", store_id="dummy_store",
                     c_h=0.5, c_u=2.0, c_f=10.0, v_i=1.0, p_i=5.0
                 )
-                return features, true_demand, cost_params
+                return features, category_idx, true_demand, cost_params
         return DataLoader(DummyDataset(), batch_size=batch_size, shuffle=True, collate_fn=custom_collate)
 
     dataset = M5InventoryDataset(data_path, mode=mode)
