@@ -1,3 +1,4 @@
+import os
 import torch
 from data.dataset import get_dataloader
 from model.lstm import DemandPredictor
@@ -15,7 +16,9 @@ def main():
     
     # 1. 初始化 DataLoader
     # 批量大小设置为 32
-    dataloader = get_dataloader(batch_size=32)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    dataset_path = os.path.join(os.path.dirname(base_dir), 'dataset')
+    dataloader = get_dataloader(data_path=dataset_path, batch_size=32)
     
     # 2. 初始化预测模型 (A同学负责)
     # 假设输入特征为 28 维 (对应最近 28 天的销量等历史特征)，隐藏层 64，输出 1 维 (未来的需求量)

@@ -42,17 +42,29 @@ def train_predict_and_optimize(
             # 模拟：将 DataLoader 中取出的字典转为强类型的 DataClass
             # 实际场景中 DataLoader 可能直接返回字典，需要在此处转换
             cost_params_list = []
-            for i in range(len(y_pred_np)):
-                cp = SKUCostParams(
-                    item_id=cost_params_dict.get('item_id', [f"item_{i}"])[i] if isinstance(cost_params_dict.get('item_id'), list) else f"item_{i}",
-                    store_id=cost_params_dict.get('store_id', [f"store_{i}"])[i] if isinstance(cost_params_dict.get('store_id'), list) else f"store_{i}",
-                    c_h=float(cost_params_dict['c_h'].item() if isinstance(cost_params_dict['c_h'], torch.Tensor) else cost_params_dict['c_h']),
-                    c_u=float(cost_params_dict['c_u'].item() if isinstance(cost_params_dict['c_u'], torch.Tensor) else cost_params_dict['c_u']),
-                    c_f=float(cost_params_dict['c_f'].item() if isinstance(cost_params_dict['c_f'], torch.Tensor) else cost_params_dict['c_f']),
-                    v_i=float(cost_params_dict['v_i'].item() if isinstance(cost_params_dict['v_i'], torch.Tensor) else cost_params_dict['v_i']),
-                    p_i=float(cost_params_dict['p_i'].item() if isinstance(cost_params_dict['p_i'], torch.Tensor) else cost_params_dict['p_i'])
-                )
-                cost_params_list.append(cp)
+            
+            # 兼容 DataLoader collate_fn 传出的两种格式: 字典(DummyDataset) 或 字典列表(RealDataset)
+            if isinstance(cost_params_dict, list) and isinstance(cost_params_dict[0], SKUCostParams):
+                cost_params_list = cost_params_dict
+            else:
+                for i in range(len(y_pred_np)):
+                    # 为了应对 DataLoader 批量合并出来的 tensor/list，进行安全提取
+                    def safe_extract(key, default_val):
+                        val = cost_params_dict.get(key, [default_val] * len(y_pred_np))
+                        if isinstance(val, list): return val[i]
+                        if isinstance(val, torch.Tensor): return val[i].item()
+                        return val
+                    
+                    cp = SKUCostParams(
+                        item_id=safe_extract('item_id', f"item_{i}"),
+                        store_id=safe_extract('store_id', f"store_{i}"),
+                        c_h=float(safe_extract('c_h', 1.0)),
+                        c_u=float(safe_extract('c_u', 5.0)),
+                        c_f=float(safe_extract('c_f', 10.0)),
+                        v_i=float(safe_extract('v_i', 10.0)),
+                        p_i=float(safe_extract('p_i', 20.0))
+                    )
+                    cost_params_list.append(cp)
             
             # ==========================================================
             # [Step 3] 求解决策 (B)
@@ -79,7 +91,7 @@ def train_predict_and_optimize(
             # [Step 5 & 6] 代理模型拟合与反向传播 (C)
             # ==========================================================
             # 每隔一定的 batch 训练/更新一次 Surrogate Model (Burn-in 阶段)
-            if len(history_y_pred) >= 128:
+            if len(history_y_pred) >= 128 and batch_idx % 10 == 0:
                 surrogate.train_surrogate(np.array(history_y_pred), np.array(history_true_cost))
                 
                 # 保留滑动窗口，丢弃太旧的探索数据
