@@ -1,295 +1,222 @@
+import numpy as np
 import pandas as pd
-import random
-import copy
-from itertools import combinations
-from tqdm import tqdm
 import time
-import statistics
 import os
 
-class QuestionsData:
-    def __init__(self, df):
+class InventoryABC:
+    def __init__(self, df, pop_size=20, max_iters=50, limit=20, budget=50000000, capacity=2000000):
+        """
+        初始化库存优化的人工蜂群算法 (ABCA)
+        
+        基于神经网络预测的需求量 y_pred，在 [Q_min, Q_max] 的搜索空间内，
+        寻找满足 预算(budget) 和 仓储容量(capacity) 约束的最佳订货方案 Q。
+        """
         self.df = df
-
-class Population:
-    def __init__(self, pop):
-        self.p = pop
-
-    def get_mean(self):
-        '''
-        获取种群的平均难度级别。
-        '''
-        return self.p['Difficulty Level'].mean()
-
-    def print_pop(self):
-        '''
-        打印种群信息。
-        '''
-        print(self.p)
-
-class Test:
-    def __init__(self, diff: float, df, pop_size: int, chap_count: list):
-        self.diff = diff # difficulty level required
-        self.chap_count = chap_count # number of questions in each chapter
-        self.q_num = sum(chap_count) # total number of questions
-        self.pop_size = pop_size # population size (for employed, onlookers and scouts)
-        self.bank = QuestionsData(df[df['Difficulty Level'] != diff]) # questions with difficulty level different from the required one
-        self.population = self.generate_initial_population() # initial population before the algorithm starts
-        self.trial = [0] * pop_size # trial limit for each bee
-    
-    '''
-    通过从伙伴中随机选择一个问题替换原始解决方案中的问题（不改变章节ID）来获得新的解决方案。如果新解决方案比原始解决方案更好，则返回 True。否则返回 False。
-    '''
-    def obtain_new_solution(self, original, partner):
-        r1 = original.p[original.p['Group'].isnull()].sample(n = 1)['ID'].values[0]
+        self.N = len(df)
+        self.pop_size = pop_size
+        self.max_iters = max_iters
+        self.limit = limit
         
-        chapter = original.p[original.p['ID'] == r1]['Chapter_ID'].values[0] # get the chapter ID of the random question
+        # 提取相关列信息
+        self.prices = df['price'].values
+        self.volumes = df['volume'].values
+        self.inventory = df['initial_inventory'].values
+        self.y_pred = df['predicted_demand'].values
+        self.Q_min = df['Q_min'].values
+        self.Q_max = df['Q_max'].values
         
-        new_question = partner.p[partner.p['Chapter_ID'] == chapter].sample(n = 1) # get a random question from the partner (with the same chapter)
-
-        gr = new_question['Group'].values[0]
-        if gr != gr: # check if the question has group
-            return False, None
-                
-        temp = copy.deepcopy(original)
-        temp.p[temp.p['ID'] == r1] = new_question.iloc[0]
+        self.budget = budget
+        self.capacity = capacity
         
-        if temp.p.nunique()["ID"] != self.q_num: 
-            return False, None
-
-        if abs(temp.get_mean() - self.diff) < abs(original.get_mean() - self.diff): # if the new solution is better than the original one
-            return True, temp
-        else:
-            return False, None
-
-    '''
-    根据章节计数要求，随机生成一个解决方案。
-    '''
-    def generate_one_solution(self):
-        flag = False
-        gr = [1,2,3,4] # group IDs
-        df = pd.DataFrame()
-        ch = random.choice(list(combinations(gr, random.randint(1, len(gr))))) # a random combination of group (example: (1,2), (2,4), ...)
-        if random.random() < 0.4: # choosing a test with group
-            df = self.bank.df[self.bank.df['Group'].isin(ch)]
-            for i,j in zip(self.chap_count, range(len(self.chap_count))): # if number of chapter is larger than required, skip and generate a solution without group
-                if i < df[df['Chapter_ID'] == j + 1].shape[0]:
-                    flag = True
-                    break
-
-            if not flag:
-                for i,j in zip(self.chap_count, range(len(self.chap_count))):
-                    count = df[df['Chapter_ID'] == j + 1].shape[0]
-                    if count == i: continue
-                    df = pd.concat([df, self.bank.df[(self.bank.df['Group'].isnull()) & (self.bank.df['Chapter_ID'] == j + 1)].sample(n = i-count)], ignore_index=True, axis=0).sort_values(by=['Chapter_ID'])
-
-                return df
-
-        df = pd.DataFrame()
-        for i,j in zip(self.chap_count, range(len(self.chap_count))):
-            df = pd.concat([df, self.bank.df[(self.bank.df['Group'].isnull()) & (self.bank.df['Chapter_ID'] == j + 1)].sample(n = i)], axis=0, ignore_index=True)
+        # 种群初始化
+        self.population = []
+        self.fitness = np.zeros(self.pop_size)
+        self.trials = np.zeros(self.pop_size)
         
-        return df
+        print(f"Initializing population of size {self.pop_size}...")
+        for i in range(self.pop_size):
+            if i == 0 and 'feasible_Q_sample' in df.columns:
+                # 使用上一步生成的已知可行解作为初始种群之一
+                sol = df['feasible_Q_sample'].values.copy()
+            else:
+                sol = self.generate_feasible_solution()
+            self.population.append(sol)
+            self.fitness[i] = self.calculate_fitness(sol)
+            
+    def is_feasible(self, Q):
+        """检查生成的解 Q 是否满足所有业务约束"""
+        cost = np.sum(self.prices * Q)
+        if cost > self.budget: return False
+        vol = np.sum(self.volumes * (self.inventory + Q))
+        if vol > self.capacity: return False
+        if np.any(Q < 0): return False
+        return True
 
-    '''
-    创建初始种群。
-    '''
-    def generate_initial_population(self):
-        return [Population(self.generate_one_solution()) for _ in range(self.pop_size)]
+    def generate_feasible_solution(self):
+        """在搜索空间 [Q_min, Q_max] 内随机生成完全合法的初始解"""
+        max_attempts = 1000
+        for _ in range(max_attempts):
+            # 注意: randint 的 high 是开区间，所以需要 +1
+            Q = np.random.randint(self.Q_min, self.Q_max + 1)
+            if self.is_feasible(Q):
+                return Q
+        return np.zeros_like(self.Q_min)
 
-    '''
-    获取整个种群中各个解决方案的平均难度。
-    '''
-    def get_all_mean(self):
-        return [i.get_mean() for i in self.population]
+    def calculate_fitness(self, Q):
+        """
+        适应度函数 (Fitness Function)：
+        在 Predict-then-Optimize 架构中，我们希望最终做出的决策尽可能符合网络的精准预测。
+        惩罚值 (Cost) = sum(|Q - y_pred|)
+        适应度 (Fitness) = 1 / (1 + Cost) ，Cost越小，适应度越高。
+        """
+        cost = np.sum(np.abs(Q - self.y_pred))
+        return 1.0 / (1.0 + cost)
 
-    '''
-    获取整个种群的适应度值列表（平均难度与目标难度之间的绝对差值）。
-    '''
-    def get_all_fitness_values(self):
-        return list(map(lambda x: abs(x - self.diff), self.get_all_mean()))
+    def mutate_solution(self, i):
+        """
+        变异生成相邻候选解。
+        蜜蜂通过参考另一个随机蜜源(解)的信息，来微调自己的位置。
+        """
+        k = i
+        while k == i:
+            k = np.random.randint(self.pop_size)
+            
+        V_i = self.population[i].copy()
+        
+        # 在标准的 ABCA 中，通常只改变一个维度。
+        # 但因为我们有几万个 SKU，每次只改变一个维度收敛极慢。
+        # 改进：我们每次随机变异 5% 的 SKU 维度 (多维度搜索)
+        mutation_rate = 0.05
+        mask = np.random.rand(self.N) < mutation_rate
+        
+        phi = np.random.uniform(-1, 1, size=self.N)
+        # 变异公式: V_{i,d} = X_{i,d} + phi * (X_{i,d} - X_{k,d})
+        V_i[mask] = V_i[mask] + (phi[mask] * (V_i[mask] - self.population[k][mask])).astype(int)
+        
+        # 边界截断，确保不会超出搜索空间定义的 Q_min 和 Q_max
+        V_i = np.clip(V_i, self.Q_min, self.Q_max)
+        
+        return V_i
 
-    '''
-    启动雇佣蜂阶段。种群中的每个解决方案与另一个随机选择的解决方案配对以生成新解决方案。
-    如果新解决方案比原方案好，则替换它并将试验次数设为0。否则，该方案的试验次数加1。
-    '''
-    def deploy_employed(self):
-        self.trial = [0] * self.pop_size
-        for i,j in zip(self.population, range(len(self.population))):
-            idx = list(range(len(self.population)))
-            idx.pop(j)
-            partner = self.population[random.choice(idx)]
-            ret, tm = self.obtain_new_solution(i, partner)
-            if ret: 
-                self.trial[j] = 0
-                self.population[j] = tm
-            else: 
-                self.trial[j] += 1
-                del tm
-
-    '''
-    启动观察蜂阶段。与雇佣蜂阶段类似，但每个解决方案根据其适应度拥有一定的概率被选中来生成新解决方案。
-    该阶段一直进行，直到生成的新解决方案数量等于种群大小。
-    '''
-    def deploy_onlookers(self):
-        i = 0
-        t = 0
-        total = sum(self.get_all_fitness_values())
-        prob = list(map(lambda x: x / total, self.get_all_fitness_values())) # calculate all probabilities
-        while (t < self.pop_size):
-            p = random.random()
-            if p < prob[i]:
-                idx = list(range(len(self.population)))
-                idx.pop(i)
-                partner = self.population[random.choice(idx)]
-                ret, tm = self.obtain_new_solution(self.population[i], partner)
-                if ret: 
-                    self.trial[i] = 0
-                    self.population[i] = tm
+    def employed_bees_phase(self):
+        """雇佣蜂阶段：每只雇佣蜂在其蜜源附近进行一次局部搜索"""
+        for i in range(self.pop_size):
+            V_i = self.mutate_solution(i)
+            # 如果变异出来的解满足约束条件，才去评估它
+            if self.is_feasible(V_i):
+                fit_V = self.calculate_fitness(V_i)
+                # 贪婪选择：如果新解比旧解好，则替换；否则试探次数+1
+                if fit_V > self.fitness[i]:
+                    self.population[i] = V_i
+                    self.fitness[i] = fit_V
+                    self.trials[i] = 0
                 else:
-                    self.trial[i] += 1
-                    del tm
+                    self.trials[i] += 1
+            else:
+                self.trials[i] += 1
+
+    def onlooker_bees_phase(self):
+        """观察蜂阶段：根据蜜源的丰富程度(适应度)，按概率选择蜜源进行局部搜索"""
+        total_fitness = np.sum(self.fitness)
+        if total_fitness == 0:
+            probs = np.ones(self.pop_size) / self.pop_size
+        else:
+            probs = self.fitness / total_fitness
+            
+        t = 0
+        i = 0
+        while t < self.pop_size:
+            # 轮盘赌选择机制
+            if np.random.rand() < probs[i]:
+                V_i = self.mutate_solution(i)
+                if self.is_feasible(V_i):
+                    fit_V = self.calculate_fitness(V_i)
+                    if fit_V > self.fitness[i]:
+                        self.population[i] = V_i
+                        self.fitness[i] = fit_V
+                        self.trials[i] = 0
+                    else:
+                        self.trials[i] += 1
+                else:
+                    self.trials[i] += 1
                 t += 1
-            i += 1
-            i = i % self.pop_size
-            
-    '''
-    启动侦察蜂阶段。如果某个解决方案的试验次数达到上限，则该解决方案会被随机生成的新解决方案替换。
-    '''
-    def deploy_scouts(self, limit):
-        for i in range(len(self.trial)):
-            if i > float(limit):
-                self.trial[i] = 0
-                self.population[i] = Population(self.generate_one_solution())
+            i = (i + 1) % self.pop_size
 
-    '''
-    用于打印种群数据框的辅助函数。
-    '''
-    def print_population(self):
-        for i in self.population:
-            i.print_pop()
+    def scout_bees_phase(self):
+        """侦察蜂阶段：如果某个解连续 limit 次都没有改进，放弃它，随机产生一个全新的解"""
+        for i in range(self.pop_size):
+            if self.trials[i] > self.limit:
+                self.population[i] = self.generate_feasible_solution()
+                self.fitness[i] = self.calculate_fitness(self.population[i])
+                self.trials[i] = 0
 
-    '''
-    用于打印当前最佳解决方案及其平均难度值的辅助函数。
-    '''
-    def print_best_solution(self):
-        best = sorted(self.population, key = lambda x: abs(self.diff - x.get_mean()))[0]
-        best.print_pop()
-        print('Best solution: Test', self.population.index(best) + 1)
-        print("Difficulty:", best.get_mean())
-        return self.population.index(best)
-
-# def change_state(is_stopped, count_stop, i):
-#     for j in range(len(count_stop)):
-#         if is_stopped[j] == False:
-#             if count_stop[j] > args['stop_iters']:
-#                 is_stopped[j] = i
-#     return is_stopped
+    def optimize(self):
+        """执行 ABCA 优化主循环"""
+        best_Q = None
+        best_fitness = -1
+        best_cost = float('inf')
         
-# def check_stop_condition(output, count_stop, is_stopped):
-#     a = output.iloc[-1].tolist()
-#     b = output.iloc[-2].tolist()
-#     a,b = np.array(a), np.array(b)
-#     result = abs((a-b)/b) < args['stop_threshold']
-#     for i in range(len(count_stop)):
-#         if is_stopped[i] == False:
-#             if result[i]:
-#                 count_stop[i] += 1
-#             else:
-#                 count_stop[i] = 0
-#     return count_stop
-    
-def print_output(test, start, output, i = None):
-    '''
-    打印输出结果，包括标准差、总运行时间以及平均每次迭代运行时间，并将结果保存到 CSV 文件中。
-    '''
-    best_idx = test.print_best_solution() # print the best solution with its average difficulty
+        for it in range(self.max_iters):
+            self.employed_bees_phase()
+            self.onlooker_bees_phase()
+            self.scout_bees_phase()
+            
+            # 记录当前代的最优解
+            current_best_idx = np.argmax(self.fitness)
+            if self.fitness[current_best_idx] > best_fitness:
+                best_fitness = self.fitness[current_best_idx]
+                best_Q = self.population[current_best_idx].copy()
+                best_cost = 1.0 / best_fitness - 1.0
+                
+            print(f"Iteration {it+1:03d}/{self.max_iters} | Best Total MAE (Error): {best_cost:.2f}")
+            
+        return best_Q, best_fitness, best_cost
 
-    print("Standard deviation:", statistics.pstdev(test.get_all_fitness_values()))
-    print('Total runtime:', time.time() - start, 'seconds')
-    print('Average runtime:', (time.time() - start) / i, 'seconds per iteration')
-
-    if args['save']:
-        output.columns=['Test {i}'.format(i=i) for i in range(1, args['pop_size'] + 1)]
-        output.round(4).to_csv(args['output'])
-    return best_idx
-
-def iteration_phase(test, output):
-    '''
-    执行指定次数的算法迭代阶段，分别调用雇佣蜂、观察蜂和侦察蜂，并将适应度结果存储在输出中。
-    '''
-    start = time.time()
-
-    for i in tqdm(range(args['num_iters'])): # iterate the algorithm
-        test.deploy_employed() # deploy employed bees
-        test.deploy_onlookers() # deploy onlookers
-        test.deploy_scouts(args['limit']) # deploy scouts
-        output = pd.concat([output, pd.DataFrame(test.get_all_fitness_values()).transpose()], axis = 0, ignore_index=True)
-#         count_stop = check_stop_condition(output, count_stop, is_stopped)
-#         is_stopped = change_state(is_stopped, count_stop, i+1)
-
-    best_idx = print_output(test, start, output, i + 1)
-    return output, best_idx
-
-
-
-#####
 if __name__ == '__main__':
-
-    # Settings
+    # 1. 配置文件路径，读取搜索空间
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    args = { 
-        "file": os.path.join(base_dir, "Main_1000_2.csv"), # Question file directory
-        "diff": 0.52, # Difficulty required
-        "pop_size": 20, # Population size for each phase
-        "num_iters": 100, # Number of iterations
-        "threshold_limit_iters": 20, # Limit for threshold
-        "threshold": 0.0005, # Threshold value
-        "limit": 20, # Limitation for scout phase
-        'save': True, # Save fitness values to a csv file
-        'output': 'output.csv', # Output file name
-    }
-
-    unique_chap = pd.read_csv(args['file']).nunique()['Chapter_ID']
-    args['section'] = [100 // unique_chap] * unique_chap
-
-    # Main flow
-    df = pd.read_csv(args['file'])
-    test = Test(args['diff'], df, args['pop_size'], args['section']) # initialize the test
-
-    # count_stop = [0] * args['pop_size']
-    # is_stopped = [False] * args['pop_size']
-
-    output = pd.DataFrame()
-    output = pd.concat([output, pd.DataFrame(test.get_all_fitness_values()).transpose()], axis = 0)
-    i = 0
-
-    best_idx = None
-
-    init_pop = test.population
-    start = time.time()
-
-    while True:
-        test.deploy_employed()
-        test.deploy_onlookers()
-        test.deploy_scouts(args['limit'])
-        i += 1
-        output = pd.concat([output, pd.DataFrame(test.get_all_fitness_values()).transpose()], axis = 0, ignore_index=True)
-    #     count_stop = check_stop_condition(output, count_stop, is_stopped)
-    #     is_stopped = change_state(is_stopped, count_stop, i)
-
-        if any(map(lambda x: x < args['threshold'], test.get_all_fitness_values())):
-            best_idx = print_output(test, start, output, i)
-            break
-            
-        if i > args['threshold_limit_iters']:
-    #         count_stop = [0] * args['pop_size']
-    #         is_stopped = [False] * args['pop_size']
-            test.population = init_pop
-            output = pd.DataFrame()
-            output = pd.concat([output, pd.DataFrame(test.get_all_fitness_values()).transpose()], axis = 0)
-            output, best_idx = iteration_phase(test, output)
-            break
-            
-    test.population = init_pop
-    print('Average initial fitness value:', statistics.mean(test.get_all_fitness_values()))
+    dataset_path = os.path.join(os.path.dirname(base_dir), 'dataset', 'abc_test_data_results.csv')
+    
+    print(f"Loading search space dataset from: {dataset_path}")
+    df = pd.read_csv(dataset_path)
+    
+    # 2. 参数设置
+    POP_SIZE = 10        # 种群规模 (针对3万多 SKU，适当减小以保证执行效率)
+    MAX_ITERS = 100      # 迭代次数 (增加到100次以获得更好的收敛效果)
+    LIMIT = 10           # 允许失败的局部试探次数，超过则变为侦察蜂
+    BUDGET = 50000000    # 预算约束 (与 make_Q.py 生成空间时一致)
+    CAPACITY = 2000000   # 容量约束
+    
+    # 3. 运行算法
+    start_time = time.time()
+    abc = InventoryABC(
+        df=df, 
+        pop_size=POP_SIZE, 
+        max_iters=MAX_ITERS, 
+        limit=LIMIT, 
+        budget=BUDGET, 
+        capacity=CAPACITY
+    )
+    
+    best_solution, best_fit, best_cost = abc.optimize()
+    end_time = time.time()
+    
+    # 4. 打印并保存结果
+    print("\n" + "="*50)
+    print("--- ABCA Optimization Completed ---")
+    print(f"Total Run Time: {end_time - start_time:.2f} seconds")
+    print(f"Best Fitness:   {best_fit:.8f}")
+    print(f"Best Cost:      {best_cost:.2f} (Total sum of |Q - y_pred|)")
+    
+    # 校验最终解是否满足物理约束
+    final_cost = np.sum(abc.prices * best_solution)
+    final_vol = np.sum(abc.volumes * (abc.inventory + best_solution))
+    print(f"Final Cost Use: {final_cost:.2f} / Budget: {BUDGET}")
+    print(f"Final Vol Use:  {final_vol:.2f} / Capacity: {CAPACITY}")
+    print("="*50 + "\n")
+    
+    # 保存结果到 CSV
+    df['ABCA_Best_Q'] = best_solution
+    output_path = os.path.join(os.path.dirname(base_dir), 'dataset', 'abca_final_solution.csv')
+    df.to_csv(output_path, index=False)
+    print(f"✅ Saved optimized ABCA solution to:\n   {output_path}")
