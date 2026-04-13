@@ -7,3 +7,5 @@ env/
 *.csv
 *.pt
 *.png
+*.egg-info/
+wandb/

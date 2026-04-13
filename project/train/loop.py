@@ -13,12 +13,20 @@ def train_predict_and_optimize(
     solver: ABCASolver, 
     env: InventoryEnvironment, 
     surrogate: SurrogateModel,
-    epochs: int = 10
+    epochs: int = 10,
+    device: torch.device = torch.device('cpu'),
+    report_to: str = "none",
+    exp_name: str = "8008"
 ):
     """
     [Step 6] 端到端 Predict-and-Optimize 训练循环 (C同学负责)
     负责串联 A(Predictor)、B(Solver+Env)、C(Surrogate) 的大动脉
     """
+    use_wandb = (report_to.lower() == "wandb")
+    if use_wandb:
+        import wandb
+        wandb.init(project=exp_name, name=f"run_epo{epochs}_bs{dataloader.batch_size}")
+        
     optimizer = Adam(predictor.parameters(), lr=1e-3)
     
     # 历史缓冲池，用于训练 Surrogate Model
@@ -28,13 +36,17 @@ def train_predict_and_optimize(
     for epoch in range(epochs):
         for batch_idx, (features, category_idx, true_demand, cost_params_dict) in enumerate(dataloader):
             
+            # 将特征数据移动到计算设备 (CUDA/MPS/CPU)
+            features = features.to(device)
+            category_idx = category_idx.to(device)
+            
             # ==========================================================
             # [Step 2] 前向预测 (A)
             # ==========================================================
             optimizer.zero_grad()
             y_pred_tensor = predictor(features, category_idx)  # 预测未来的需求 y_it
             
-            # 包装为接口类
+            # 包装为接口类，注意从设备转移到 CPU
             y_pred_np = y_pred_tensor.detach().cpu().numpy().flatten()
             predictor_out = PredictorOutput(y_pred=y_pred_np)
             true_demand_np = true_demand.numpy().flatten()
@@ -112,6 +124,30 @@ def train_predict_and_optimize(
                 
                 if batch_idx % 10 == 0:
                     print(f"Epoch {epoch} | Batch {batch_idx} | Surrogate Loss (True Cost): {loss.item():.2f}")
+                    
+                if use_wandb:
+                    wandb.log({
+                        "epoch": epoch,
+                        "batch": batch_idx,
+                        "surrogate_loss": loss.item(),
+                        "mean_true_cost": true_costs_np.mean(),
+                        "mean_y_pred": y_pred_np.mean()
+                    })
             else:
                 if batch_idx % 10 == 0:
                     print(f"Epoch {epoch} | Batch {batch_idx} | Collecting data to warmup Surrogate...")
+                
+                if use_wandb:
+                    wandb.log({
+                        "epoch": epoch,
+                        "batch": batch_idx,
+                        "mean_true_cost": true_costs_np.mean(),
+                        "mean_y_pred": y_pred_np.mean()
+                    })
+                    
+            print(f"DEBUG: Finished batch {batch_idx}")
+            
+    if use_wandb:
+        wandb.finish()
+        
+    print("DEBUG: Training loop completed successfully.")

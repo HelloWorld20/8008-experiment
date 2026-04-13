@@ -26,6 +26,7 @@ def run_end_to_end_test():
     # 获取一个 batch 以探测 input_size
     batch = next(iter(dataloader))
     features = batch[0]
+    category_idx = batch[1]
     
     # 我们的 features shape 目前可能是 (batch_size, seq_len)
     # 对于 LSTM 来说，我们需要把它转成 (batch_size, seq_len, input_size) 
@@ -43,8 +44,12 @@ def run_end_to_end_test():
     
     # 2. 初始化四大组件
     print("[2/5] Initializing Components...")
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    print(f"      Using device: {device}")
+    
     # A同学: 预测模型
-    predictor = DemandPredictor(input_size=input_size, hidden_size=64, num_layers=2)
+    predictor = DemandPredictor(input_size=input_size, hidden_size=64, num_layers=2).to(device)
     # B同学: 求解器
     solver = ABCASolver(pop_size=20, max_iter=30)
     # B同学: 环境
@@ -62,7 +67,8 @@ def run_end_to_end_test():
         solver=solver,
         env=env,
         surrogate=surrogate,
-        epochs=2
+        epochs=2,
+        device=device
     )
     print("-" * 50)
     print("[4/5] Training Loop Completed Successfully!")
@@ -71,7 +77,7 @@ def run_end_to_end_test():
     print("[5/5] Final Status Check:")
     print(f"      Surrogate Trained: {surrogate.is_trained}")
     # 测试预测模型是否正常工作
-    test_out = predictor(features)
+    test_out = predictor(features.to(device), category_idx.to(device))
     print(f"      Predictor Output Shape: {test_out.shape}")
     print("=== All End-to-End Tests Passed ===")
 
