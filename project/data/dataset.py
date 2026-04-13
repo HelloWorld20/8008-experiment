@@ -67,6 +67,9 @@ class M5InventoryDataset(Dataset):
         categories = []
         for i in range(sales_only.shape[0]):
             categories.append(calculate_category(sales_only[i]))
+
+        # 使用 copy() 来避免 PerformanceWarning (DataFrame is highly fragmented)
+        self.sales_df = self.sales_df.copy()
         self.sales_df['category_idx'] = categories
 
         print(f"Dataset initialized with {len(self.sales_df)} SKUs.")

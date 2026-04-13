@@ -16,13 +16,13 @@ dependencies = [
     "joblib",
     "lightgbm",
     "matplotlib",
-    "numpy",
+    "numpy<2",
     "pandas",
     "plotly",
     "scikit-learn",
     "seaborn",
     "torch",
-    "tqdm"
+    "tqdm",
 ]
 
 [project.optional-dependencies]

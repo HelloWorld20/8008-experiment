@@ -1,10 +1,11 @@
 import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+os.environ['OMP_NUM_THREADS'] = '1'
 import argparse
-import torch
 from data.dataset import get_dataloader
 from model.lstm import DemandPredictor
 from solver.abca import ABCASolver
-from env.inventory import InventoryEnvironment
+from environment.inventory import InventoryEnvironment
 from surrogate.model import SurrogateModel
 from train.loop import train_predict_and_optimize
 

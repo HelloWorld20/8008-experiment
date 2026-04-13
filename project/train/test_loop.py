@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from data.dataset import get_dataloader
 from model.lstm import DemandPredictor
 from solver.abca import ABCASolver
-from env.inventory import InventoryEnvironment
+from environment.inventory import InventoryEnvironment
 from surrogate.model import SurrogateModel
 from train.loop import train_predict_and_optimize
 

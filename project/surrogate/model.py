@@ -1,7 +1,6 @@
 import torch
 import numpy as np
-import lightgbm as lgb
-from typing import Tuple
+from sklearn.ensemble import HistGradientBoostingRegressor
 import warnings
 
 # 忽略 sklearn 特征名称警告
@@ -10,19 +9,19 @@ warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 class SurrogateModel:
     """
     [Step 5] 代理模型 (C同学负责)
-    使用 LightGBM 拟合 (y_pred) -> true_cost 的映射，从而提供平滑的梯度
+    使用 HistGradientBoostingRegressor (代替 LightGBM 解决 macOS 上的 segfault 问题)
+    拟合 (y_pred) -> true_cost 的映射，从而提供平滑的梯度
     """
     def __init__(self):
-        # 初始化 LightGBM 回归器作为代理模型
+        # 初始化 回归器作为代理模型
         # 调参：为了使预测曲面更加平滑（有利于计算有限差分梯度），限制树深和叶子节点数
-        self.model = lgb.LGBMRegressor(
-            n_estimators=100, 
+        self.model = HistGradientBoostingRegressor(
+            max_iter=100, 
             learning_rate=0.05,
             max_depth=5,
-            num_leaves=15,
-            min_child_samples=5,
-            random_state=42,
-            verbose=-1
+            max_leaf_nodes=15,
+            min_samples_leaf=5,
+            random_state=42
         )
         self.is_trained = False
         
@@ -36,7 +35,15 @@ class SurrogateModel:
         """
         # 拟合 mapping: y_pred -> true_cost
         # 注意：这里 y_pred 是一维特征。在实际复杂业务中，可能会把 item_id 的 embedding、季节特征等也拼进来
-        self.model.fit(y_pred_history.reshape(-1, 1), true_cost_history)
+        print("DEBUG: Calling LightGBM fit()...")
+        try:
+            self.model.fit(y_pred_history.reshape(-1, 1), true_cost_history)
+            print("DEBUG: LightGBM fit() finished.")
+        except Exception as e:
+            print(f"DEBUG: LightGBM fit() raised exception: {e}")
+            import traceback
+            traceback.print_exc()
+            raise e
         self.is_trained = True
         
     def predict_cost(self, y_pred: np.ndarray) -> np.ndarray:

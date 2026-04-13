@@ -1,0 +1,54 @@
+import numpy as np
+from typing import List
+from interfaces import SKUCostParams, SolverOutput, EnvironmentOutput
+
+class InventoryEnvironment:
+    """
+    [Step 4] 真实库存环境 (B同学负责)
+    负责计算在真实的未知需求下，当前决策导致的真实业务成本 (Cost Function)
+    """
+    def __init__(self):
+        pass
+        
+    def evaluate_cost(self, 
+                      solver_out: SolverOutput, 
+                      true_demand: np.ndarray, 
+                      cost_params: List[SKUCostParams]) -> EnvironmentOutput:
+        """
+        计算真实的库存运营成本 (Holding Cost + Shortage Cost + Ordering Cost)
+        
+        参数:
+            solver_out (SolverOutput): ABCA 求解器给出的订货量接口类
+            true_demand (np.ndarray): 真实发生的需求量 D_it, 形状 (batch_size, )
+            cost_params (List[SKUCostParams]): 各 SKU 的成本参数接口类
+            
+        返回:
+            EnvironmentOutput: 包含每个 SKU 真实总成本的接口类
+        """
+        # TODO: B同学需要在这里实现非线性、非对称的真实 Cost 计算
+        # 对应 Proposal 公式: TC = c_h * max(0, Q - D) + c_u * max(0, D - Q) + c_f * I(Q > 0)
+        
+        Q_it = solver_out.Q_it
+        batch_size = len(Q_it)
+        
+        # 将 cost_params 转换为 numpy 数组以进行向量化计算
+        c_h_arr = np.array([cp.c_h for cp in cost_params], dtype=np.float32)
+        c_u_arr = np.array([cp.c_u for cp in cost_params], dtype=np.float32)
+        c_f_arr = np.array([cp.c_f for cp in cost_params], dtype=np.float32)
+        
+        # 向量化计算
+        # 1. 积压量和缺货量
+        overage = np.maximum(0, Q_it - true_demand)
+        shortage = np.maximum(0, true_demand - Q_it)
+        
+        # 2. 持有成本和缺货成本
+        holding_cost = c_h_arr * overage
+        shortage_cost = c_u_arr * shortage
+        
+        # 3. 订货成本: 只有当订货量大于0时才发生
+        order_cost = np.where(Q_it > 0, c_f_arr, 0.0)
+        
+        # 4. 总成本
+        costs = holding_cost + shortage_cost + order_cost
+        
+        return EnvironmentOutput(true_costs=costs.astype(np.float32))

@@ -3,9 +3,9 @@ import numpy as np
 from torch.optim import Adam
 from model.lstm import DemandPredictor
 from solver.abca import ABCASolver
-from env.inventory import InventoryEnvironment
+from environment.inventory import InventoryEnvironment
 from surrogate.model import SurrogateModel, SurrogateAutogradFunction
-from interfaces import SKUCostParams, GlobalConstraints, PredictorOutput, SolverOutput, EnvironmentOutput
+from interfaces import SKUCostParams, GlobalConstraints, PredictorOutput
 
 def train_predict_and_optimize(
     dataloader, 

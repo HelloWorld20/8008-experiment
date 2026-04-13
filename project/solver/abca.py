@@ -7,7 +7,8 @@ class ABCASolver:
     [Step 3] 人工蜂群运筹求解器 (B同学负责)
     基于预测的需求量 y_pred 和 全局约束，搜索最优的订单量 Q_it
     """
-    def __init__(self, max_iter: int = 100, pop_size: int = 50, limit: int = 20):
+    def __init__(self, max_iter: int = 10, pop_size: int = 10, limit: int = 5):
+        # 显著调小默认参数，防止在端到端训练的每个 Batch 中耗时过长卡住
         self.max_iter = max_iter
         self.pop_size = pop_size
         self.limit = limit  # 侦查蜂重置阈值
