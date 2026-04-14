@@ -1,51 +1,50 @@
-Raw Data (M5)
-   ↓
-Feature Engineering + Parameter Generation
-   ↓
-[Step 1] Demand Clustering（风险分组）
-   ↓
-[Step 2] Neural Network（预测 demand）
-   ↓
-[Step 3] ABCA Solver（决策 Q_it）
-   ↓
-[Step 4] Inventory Environment（计算真实 cost）
-   ↓
-[Step 5] Surrogate Model（拟合 cost function）
-   ↓
-[Step 6] Backprop（更新 NN）
+# End-to-End Predict-and-Optimize (端到端决策学习框架)
 
-构造 Q_it 空间结果: abc_test_data_results.csv
+本项目实现了一个基于“预测-优化”流水线的端到端库存决策学习框架。通过神经网络进行需求预测，ABCA启发式算法进行运筹求解，并利用 LightGBM 代理模型（Surrogate Model）将不可导的业务成本转换为可传导的梯度，直接驱动预测网络以“最小化最终业务成本”为目标进行优化。
 
-ABCA计算后的结果：abca_final_results.csv
-相对于输入，会多一列『ABCA_Best_Q』，代表每个 SKU 最优的 Q_it（进货量）
+## 🚀 启动训练
 
-整体Pipeline的解释：
+可以通过命令行运行端到端训练脚本，支持以下参数：
 
-所以神经网络是在训练的每一次epoch，然后用当前状态的model推理一次，然后再走Step3到Step5，计算loss，然后再反向更新
+```bash
+python project/main.py [参数...]
+```
 
-### 完整的单次训练迭代 (One Training Step)
+### 命令行参数说明
 
-1. [Step 2] 前向推理 (Forward Pass) ：
-   - 当前状态的神经网络（哪怕刚初始化，或者训练了一半）读取一个 Batch 的历史数据。
-   - 网络输出这个 Batch 所有 SKU 的 预测需求 [ o bj ec tO bj ec t ] y ^ ​ 。
+| 参数             |  类型   | 默认值 | 说明                                                                                                                                                                                        |
+| :--------------- | :-----: | :----: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--epochs`       |  `int`  |  `5`   | 训练的 Epoch 数量。建议先使用 `1` 或 `2` 进行测试。                                                                                                                                         |
+| `--report_to`    |  `str`  | `none` | 是否上报指标到特定平台。设为 `"wandb"` 可启用 Weights & Biases 画图。                                                                                                                       |
+| `--exp_name`     |  `str`  | `8008` | 实验/项目名称。当 `report_to=wandb` 时，作为 wandb project name。                                                                                                                           |
+| `--penalty_coef` | `float` | `10.0` | **缺货声誉惩罚系数（核心业务参数）**。缺货不仅损失当前商品的毛利，还会导致客户流失。此系数定义了缺货导致的额外惩罚是“单件商品售价的多少倍”。系数过低（如 0.0）会导致模型摆烂预测 0 不进货。 |
 
-2. [Step 3] 求解决策 (Solve for Decision) ：
-   - 拿着这个新鲜出炉的 [ o bj ec tO bj ec t ] y ^ ​ ，结合物理约束（预算、容量等），构造出搜索空间。
-   - 扔给 abca.py （ABCA Solver）跑一圈。
-   - ABCA 给出一个在这个 [ o bj ec tO bj ec t ] y ^ ​ 认知下“自认为最好”的订货方案 [ o bj ec tO bj ec t ] Q ∗ 。
+**示例命令**：
 
-3. [Step 4] 计算真实业务损失 (Evaluate True Cost) ：
-   - 拿着这个决定好的订货单 [ o bj ec tO bj ec t ] Q ∗ ，去和**真实的未来需求（Ground Truth [ o bj ec tO bj ec t ] y ）**对账。
-   - 在虚拟的“库存环境”中计算：卖出去了多少赚了多少钱？积压了多少亏了多少仓储费？缺货了多少扣了多少信誉分？
-   - 得出一个真实的、反映业务痛点的 总成本 (True Cost) 。
-   - （这就是你整个系统的终极 Loss 目标！）
+```bash
+# 运行 3 个 Epoch，开启 wandb 记录，并将缺货惩罚倍数设为 15 倍
+python project/main.py --epochs 3 --report_to wandb --penalty_coef 15.0
+```
 
-4. [Step 5] 代理模型拟合伪梯度 (Surrogate Model for Gradients) ：
-   - 难点来了 ：ABCA 是一个基于随机变异和贪心选择的黑盒算法，它 不可导 ！你没法用 PyTorch 的 .backward() 把 True Cost 的梯度直接穿过 ABCA 传回给神经网络。
-   - 解法 ：我们用另一个简单的、可导的神经网络（代理模型，Surrogate Model）来学习这个映射关系： [ o bj ec tO bj ec t ] y ^ ​ → T r u e C os t 。
-   - 代理模型看多了“什么样的预测会导致什么样的成本”之后，它就能告诉你： “如果你的预测 [ o bj ec tO bj ec t ] y ^ ​ 能稍微往上偏一点点，最终的 Cost 就会下降” 。这就产生了梯度（ [ o bj ec tO bj ec t ] ∂ y ^ ​ ∂ C os t ​ ）。
+---
 
-5. [Step 6] 反向传播更新网络 (Backward Pass & Update) ：
-   - 把代理模型算出来的伪梯度传回给最初的神经网络（Step 2）。
-   - 网络根据这个梯度，使用优化器（如 Adam）更新自己的权重参数。
-   - 目的：让下一次（下一个 Epoch）输出的 [ o bj ec tO bj ec t ] y ^ ​ ，能引导 ABCA 做出一个 True Cost 更小的 [ o bj ec tO bj ec t ] Q ∗ 。
+## 📊 核心监控指标 (Metrics) 解析
+
+在训练过程中（特别是使用 wandb 时），需要密切关注以下三个核心指标的走势，它们能够反映整个端到端系统是否正常工作：
+
+### 1. `mean_true_cost` (真实的业务成本均值)
+
+- **含义**：这是整个流程的**终极北极星指标**！它表示求解器根据当前的预测结果做出订货决策后，放到真实业务环境里与真实客流碰撞后，产生的真金白银的业务成本（如：库存积压费 + 缺货赔偿费）。
+- **目标**：**越低越好**。它的平稳下降说明端到端系统在实际业务中表现越来越好。
+
+### 2. `surrogate_loss` (代理模型预测的成本)
+
+- **含义**：代理模型（Surrogate Model）基于当前的预测需求量（`y_pred`）和商品的成本结构参数，估算出来的**近似业务成本**。神经网络的优化器正是以这个值为目标计算梯度并进行反向传播。
+- **目标**：**越低越好**。它应该紧紧跟随着 `mean_true_cost` 的走势。如果它和 `mean_true_cost` 走势脱节，说明代理模型拟合失效（可能是灾难性遗忘或特征缺失）。
+
+### 3. `mean_y_pred` (模型预测的需求量均值)
+
+- **含义**：预测网络预测出来的商品需求量的平均值。
+- **目标**：**不一定下降！它的目标是贴合真实需求，并在成本参数下寻找平衡**。
+  - 如果这个值剧烈震荡，说明代理模型传回来的梯度存在巨大噪声。
+  - 如果这个值**跌到 0 且不再反弹**，说明缺货惩罚（`penalty_coef`）设置得太低，模型发现“不进货”是成本最低的最优解，于是选择“摆烂”。此时需要调高 `--penalty_coef` 逼迫模型做出正常的预测。

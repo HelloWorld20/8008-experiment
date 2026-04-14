@@ -3,7 +3,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import pandas as pd
 import numpy as np
-from typing import Tuple, List
+from typing import Tuple
 
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -15,16 +15,18 @@ class M5InventoryDataset(Dataset):
     M5 沃尔玛库存数据集加载器
     负责读取特征并返回: (features, true_demand, cost_params)
     """
-    def __init__(self, data_path: str, mode: str = 'train', seq_len: int = 28):
+    def __init__(self, data_path: str, mode: str = 'train', seq_len: int = 28, penalty_coef: float = 10.0):
         """
         Args:
             data_path: dataset 文件夹路径 (例如: '../dataset')
             mode: 'train' 或 'test'
             seq_len: 历史窗口长度 (默认使用过去 28 天的销量作为特征)
+            penalty_coef: 缺货声誉惩罚系数 (基于售价的倍数)
         """
         self.data_path = data_path
         self.mode = mode
         self.seq_len = seq_len
+        self.penalty_coef = penalty_coef
         
         # 1. 加载核心销售数据
         sales_path = os.path.join(data_path, 'sales_train_evaluation.csv')
@@ -110,9 +112,13 @@ class M5InventoryDataset(Dataset):
         # 假设持仓成本是采购价的 20% / 52周
         c_h = p_i * 0.20 / 52.0
         
-        # 假设售价是采购价的 1.5 倍，缺货成本即为损失的毛利
+        # 方案A修改：大幅提高缺货成本 (c_u) 
+        # 原来是: c_u = sell_price - p_i (即售价减去进价的毛利，可能太低导致模型选择不进货)
+        # 现在修改为：缺货成本不仅包含丢失的毛利，还包含巨大的声誉惩罚（基于售价的 penalty_coef 倍数）
         sell_price = p_i * 1.5
-        c_u = sell_price - p_i
+        lost_margin = sell_price - p_i
+        reputation_penalty = sell_price * self.penalty_coef
+        c_u = lost_margin + reputation_penalty
         
         # 假设固定订货成本为 10.0
         c_f = 10.0
@@ -138,7 +144,7 @@ class M5InventoryDataset(Dataset):
         
         return features, category_idx, true_demand, cost_params
 
-def get_dataloader(data_path: str, batch_size: int = 32, mode: str = 'train') -> DataLoader:
+def get_dataloader(data_path: str, batch_size: int = 32, mode: str = 'train', penalty_coef: float = 10.0) -> DataLoader:
     """
     获取 DataLoader
     为了避免在单测中加载整个真实数据集太慢，如果在 data_path 找不到真实文件，
@@ -154,21 +160,10 @@ def get_dataloader(data_path: str, batch_size: int = 32, mode: str = 'train') ->
         cost_params_list = [item[3] for item in batch]
         return features, category_idx, demands, cost_params_list
 
+    # 删除 DummyDataset，确保真实数据不存在时直接报错
     if not os.path.exists(sales_path):
-        print(f"Warning: Real dataset not found at {sales_path}. Using Dummy Dataset for testing.")
-        class DummyDataset(Dataset):
-            def __len__(self): return 100
-            def __getitem__(self, idx):
-                features = torch.randn(28)
-                category_idx = torch.randint(0, 4, (1,)).squeeze()
-                true_demand = torch.tensor([5.0])
-                cost_params = SKUCostParams(
-                    item_id=f"dummy_{idx}", store_id="dummy_store",
-                    c_h=0.5, c_u=2.0, c_f=10.0, v_i=1.0, p_i=5.0
-                )
-                return features, category_idx, true_demand, cost_params
-        return DataLoader(DummyDataset(), batch_size=batch_size, shuffle=True, collate_fn=custom_collate)
+        raise FileNotFoundError(f"【严重错误】未找到真实数据集文件: {sales_path}。请确保已下载并放置了正确的 M5 数据集 (sales_train_evaluation.csv 等)。")
 
-    dataset = M5InventoryDataset(data_path, mode=mode)
+    dataset = M5InventoryDataset(data_path, mode=mode, penalty_coef=penalty_coef)
         
     return DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate)

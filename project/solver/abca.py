@@ -72,7 +72,9 @@ class ABCASolver:
         
         for i in range(self.pop_size):
             # 围绕预测需求量生成初始解，保证非负
-            population[i] = np.maximum(0, np.random.normal(loc=y_pred, scale=y_pred * 0.2)).astype(np.int32)
+            safe_y_pred = np.nan_to_num(y_pred, nan=0.0)
+            safe_scale = np.maximum(1e-5, safe_y_pred * 0.2)
+            population[i] = np.maximum(0, np.random.normal(loc=safe_y_pred, scale=safe_scale)).astype(np.int32)
             fitness[i] = self._evaluate_cost(population[i], y_pred, global_constraints)
             
         best_idx = np.argmin(fitness)
@@ -148,7 +150,10 @@ class ABCASolver:
             for i in range(self.pop_size):
                 if trials[i] >= self.limit:
                     # 重新随机生成一个解
-                    population[i] = np.maximum(0, np.random.normal(loc=y_pred, scale=y_pred * 0.5)).astype(np.int32)
+                    # 安全保护：如果 y_pred 为 NaN 或极小，防止 np.random.normal 报错
+                    safe_y_pred = np.nan_to_num(y_pred, nan=0.0)
+                    safe_scale = np.maximum(1e-5, safe_y_pred * 0.5) # 防止 scale <= 0
+                    population[i] = np.maximum(0, np.random.normal(loc=safe_y_pred, scale=safe_scale)).astype(np.int32)
                     fitness[i] = self._evaluate_cost(population[i], y_pred, global_constraints)
                     trials[i] = 0
 

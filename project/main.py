@@ -16,9 +16,10 @@ def main():
     负责初始化所有模块并启动端到端训练流水线。
     """
     parser = argparse.ArgumentParser(description="End-to-End Predict-and-Optimize Training")
-    parser.add_argument('--epochs', type=int, default=10, help='epochs数量 (default: 10)')
+    parser.add_argument('--epochs', type=int, default=5, help='epochs数量 (default: 5)')
     parser.add_argument('--report_to', type=str, default='none', help='是否上报指标到特定平台，如 "wandb"')
     parser.add_argument('--exp_name', type=str, default='8008', help='实验/项目名称，当 report_to=wandb 时作为 wandb project name')
+    parser.add_argument('--penalty_coef', type=float, default=10.0, help='缺货声誉惩罚系数，基于售价的倍数 (default: 10.0)')
     args = parser.parse_args()
 
     print("Initializing Project Components...")
@@ -31,7 +32,7 @@ def main():
     # 批量大小设置为 32
     base_dir = os.path.dirname(os.path.abspath(__file__))
     dataset_path = os.path.join(os.path.dirname(base_dir), 'dataset')
-    dataloader = get_dataloader(data_path=dataset_path, batch_size=32)
+    dataloader = get_dataloader(data_path=dataset_path, batch_size=32, penalty_coef=args.penalty_coef)
     print(f"DEBUG: DataLoader length: {len(dataloader)}")
     
     # 2. 初始化预测模型 (A同学负责)

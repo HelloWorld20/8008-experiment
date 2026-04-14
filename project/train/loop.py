@@ -15,7 +15,7 @@ def train_predict_and_optimize(
     surrogate: SurrogateModel,
     epochs: int = 10,
     device: torch.device = torch.device('cpu'),
-    report_to: str = "none",
+    report_to: str = "wandb",
     exp_name: str = "8008"
 ):
     """
@@ -31,6 +31,7 @@ def train_predict_and_optimize(
     
     # 历史缓冲池，用于训练 Surrogate Model
     history_y_pred = []
+    history_context = []
     history_true_cost = []
     
     for epoch in range(epochs):
@@ -78,6 +79,12 @@ def train_predict_and_optimize(
                     )
                     cost_params_list.append(cp)
             
+            # 提取 context (c_h, c_u, c_f, p_i, v_i) 用于训练代理模型
+            context_list = []
+            for cp in cost_params_list:
+                context_list.append([cp.c_h, cp.c_u, cp.c_f, cp.p_i, cp.v_i])
+            context_np = np.array(context_list, dtype=np.float32)
+            
             # ==========================================================
             # [Step 3] 求解决策 (B)
             # ==========================================================
@@ -97,6 +104,7 @@ def train_predict_and_optimize(
             
             # 收集数据以训练代理模型
             history_y_pred.extend(y_pred_np)
+            history_context.extend(context_np)
             history_true_cost.extend(true_costs_np)
             
             # ==========================================================
@@ -104,16 +112,22 @@ def train_predict_and_optimize(
             # ==========================================================
             # 每隔一定的 batch 训练/更新一次 Surrogate Model (Burn-in 阶段)
             if len(history_y_pred) >= 128 and batch_idx % 10 == 0:
-                surrogate.train_surrogate(np.array(history_y_pred), np.array(history_true_cost))
+                surrogate.train_surrogate(
+                    np.array(history_y_pred), 
+                    np.array(history_context), 
+                    np.array(history_true_cost)
+                )
                 
                 # 保留滑动窗口，丢弃太旧的探索数据
                 history_y_pred = history_y_pred[-1000:]
+                history_context = history_context[-1000:]
                 history_true_cost = history_true_cost[-1000:]
                 
             if surrogate.is_trained:
                 # 关键步骤：使用自定义的 Autograd Function 桥接 PyTorch 和 LightGBM
                 # 这样一来，Cost 就能被求导并回传给 y_pred_tensor
-                cost_tensor = SurrogateAutogradFunction.apply(y_pred_tensor, surrogate)
+                context_tensor = torch.tensor(context_np, dtype=torch.float32, device=device)
+                cost_tensor = SurrogateAutogradFunction.apply(y_pred_tensor, context_tensor, surrogate)
                 
                 # 我们的终极目标是最小化业务成本，而不是 MSE
                 loss = cost_tensor.mean()
@@ -145,7 +159,6 @@ def train_predict_and_optimize(
                         "mean_y_pred": y_pred_np.mean()
                     })
                     
-            print(f"DEBUG: Finished batch {batch_idx}")
             
     if use_wandb:
         wandb.finish()
