@@ -107,8 +107,12 @@ class SurrogateAutogradFunction(torch.autograd.Function):
         # 计算伪梯度 = (f(x+e) - f(x-e)) / (2e)
         surrogate_grad = (cost_plus - cost_minus) / (2 * epsilon)
         
-        # 为了防止梯度爆炸，对伪梯度进行裁剪 (Gradient Clipping)
-        surrogate_grad = np.clip(surrogate_grad, -5.0, 5.0)
+        # 保存未裁剪的梯度，用于在外部打印和监控 (将均值保存到 Surrogate 实例中)
+        surrogate_model.last_mean_abs_grad = np.mean(np.abs(surrogate_grad))
+        
+        # 为了防止梯度爆炸，对伪梯度进行更加严格的裁剪 (Gradient Clipping)
+        # 限制代理模型传给神经网络的惩罚更“温和”
+        surrogate_grad = np.clip(surrogate_grad, -1.0, 1.0)
         
         # 将 Numpy Array 转回 PyTorch Tensor，并恢复形状
         grad_tensor = torch.tensor(surrogate_grad, dtype=torch.float32, device=y_pred_tensor.device).view(original_shape)

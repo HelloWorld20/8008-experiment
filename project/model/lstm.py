@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class DemandPredictor(nn.Module):
     """
@@ -38,14 +39,14 @@ class DemandPredictor(nn.Module):
             dropout=0.1 if num_layers > 1 else 0.0
         )
         
-        # 对应参考代码中的多层全连接网络，显著减少参数量
+        # 使用 LayerNorm 替代 BatchNorm，减少小 batch 和长尾分布带来的抖动。
         self.fc1 = nn.Linear(hidden_size, 32)
-        self.bn1 = nn.BatchNorm1d(32, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
-        self.dp1 = nn.Dropout(0.1)
+        self.ln1 = nn.LayerNorm(32)
+        self.dp1 = nn.Identity()
         
         self.fc2 = nn.Linear(32, 16)
-        self.bn2 = nn.BatchNorm1d(16, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
-        self.dp2 = nn.Dropout(0.1)
+        self.ln2 = nn.LayerNorm(16)
+        self.dp2 = nn.Identity()
         
         self.fc3 = nn.Linear(16, output_size)
         self.relu = nn.ReLU()
@@ -55,8 +56,8 @@ class DemandPredictor(nn.Module):
         前向传播计算预测需求量
         
         参数:
-            x (torch.Tensor): 输入特征张量, 形状 (batch_size, seq_len, input_size) 
-                              或 (batch_size, input_size)
+            x (torch.Tensor): 输入特征张量, 推荐形状为 (batch_size, seq_len, input_size)
+                              兼容旧格式 (batch_size, input_size)
             category_idx (torch.Tensor): 类别索引特征, 形状 (batch_size,)
             
         返回:
@@ -75,7 +76,7 @@ class DemandPredictor(nn.Module):
                 emb_expanded = emb.unsqueeze(1).expand(-1, x.shape[1], -1)
                 x = torch.cat([x, emb_expanded], dim=-1)
 
-        # 如果输入没有序列维度，则扩展一维: (batch_size, input_size) -> (batch_size, 1, input_size)
+        # 兼容旧数据格式，避免历史脚本直接报错。
         if len(x.shape) == 2:
             x = x.unsqueeze(1)
             
@@ -88,19 +89,15 @@ class DemandPredictor(nn.Module):
         # hn[-1] 形状: (batch_size, hidden_size)
         final_state = hn[-1]
         
-        # 第一个全连接模块：Linear -> BatchNorm -> Dropout -> ReLU
+        # 第一个全连接模块：Linear -> LayerNorm -> ReLU
         out = self.fc1(final_state)
-        # 注意: 如果 batch_size = 1，BatchNorm1d 可能会报错。如果是训练模式且 batch_size=1，则跳过 BatchNorm 或通过 eval() 规避。
-        # 这里为了稳健性，加一个条件判断
-        if out.shape[0] > 1 or not self.training:
-            out = self.bn1(out)
+        out = self.ln1(out)
         out = self.dp1(out)
         out = self.relu(out)
         
-        # 第二个全连接模块：Linear -> BatchNorm -> Dropout -> ReLU
+        # 第二个全连接模块：Linear -> LayerNorm -> ReLU
         out = self.fc2(out)
-        if out.shape[0] > 1 or not self.training:
-            out = self.bn2(out)
+        out = self.ln2(out)
         out = self.dp2(out)
         out = self.relu(out)
         
@@ -109,7 +106,6 @@ class DemandPredictor(nn.Module):
         
         # 需求量应为非负数，使用 Softplus 替代 ReLU，避免 Dying ReLU 问题导致梯度消失
         # Softplus(x) = log(1 + exp(x))，平滑且在 x<0 时也有微小梯度
-        import torch.nn.functional as F
         y_pred = F.softplus(out)
         
         return y_pred

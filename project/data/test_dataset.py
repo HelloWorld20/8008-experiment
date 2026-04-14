@@ -5,7 +5,7 @@ import torch
 # 将 project 目录加入 sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from data.dataset import get_dataloader
+from data.dataset import get_dataloader, HISTORY_WINDOW_DAYS
 
 def test_dataset():
     """
@@ -30,15 +30,18 @@ def test_dataset():
         # 尝试读取第一个 batch 的数据
         print("Fetching first batch...")
         batch = next(iter(dataloader))
-        features, true_demand, cost_params_list = batch
+        features, category_idx, true_demand, cost_params_list = batch
         
         # 打印并验证特征的形状和类型
-        print(f"Features Shape: {features.shape} (Expected: [batch_size, feature_dim])")
+        print(f"Features Shape: {features.shape} (Expected: [batch_size, {HISTORY_WINDOW_DAYS}, 1])")
+        print(f"Category Shape: {category_idx.shape} (Expected: [batch_size])")
         print(f"True Demand Shape: {true_demand.shape} (Expected: [batch_size, 1] or [batch_size])")
         print(f"Cost Params Count: {len(cost_params_list)} (Expected: {batch_size})")
         
         assert isinstance(features, torch.Tensor), "Features should be a PyTorch Tensor"
         assert features.shape[0] == batch_size, "Batch size mismatch in features"
+        assert features.shape[1] == HISTORY_WINDOW_DAYS, "Sequence length mismatch in features"
+        assert features.shape[2] == 1, "Input size mismatch in features"
         assert len(cost_params_list) == batch_size, "Batch size mismatch in cost parameters"
         
         # 打印第一个样本的成本参数，验证是否成功解析为 dataclass

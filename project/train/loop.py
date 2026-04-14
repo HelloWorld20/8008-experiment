@@ -1,11 +1,58 @@
 import torch
 import numpy as np
 from torch.optim import Adam
+from torch.nn.utils import clip_grad_norm_
+import torch.nn.functional as F
 from model.lstm import DemandPredictor
 from solver.abca import ABCASolver
 from environment.inventory import InventoryEnvironment
 from surrogate.model import SurrogateModel, SurrogateAutogradFunction
 from interfaces import SKUCostParams, GlobalConstraints, PredictorOutput
+
+def build_total_loss(cost_loss: torch.Tensor, pred_loss: torch.Tensor, loss_strategy: str, loss_alpha: float):
+    """
+    根据选择的策略构造总损失，并返回可单独记录的各项 loss。
+
+    方案说明:
+        weighted_sum: 直接优化 cost_loss + alpha * pred_loss
+        balanced_sum: 先按当前 batch 的量级归一化，再做加权求和
+    """
+    if loss_strategy == "weighted_sum":
+        total_loss = cost_loss + loss_alpha * pred_loss
+        aux_metrics = {
+            "scaled_cost_loss": cost_loss.detach(),
+            "scaled_pred_loss": (loss_alpha * pred_loss).detach()
+        }
+        return total_loss, aux_metrics
+
+    if loss_strategy == "balanced_sum":
+        cost_scale = cost_loss.detach().abs().clamp_min(1.0)
+        pred_scale = pred_loss.detach().abs().clamp_min(1.0)
+        normalized_cost_loss = cost_loss / cost_scale
+        normalized_pred_loss = pred_loss / pred_scale
+        total_loss = normalized_cost_loss + loss_alpha * normalized_pred_loss
+        aux_metrics = {
+            "scaled_cost_loss": normalized_cost_loss.detach(),
+            "scaled_pred_loss": (loss_alpha * normalized_pred_loss).detach()
+        }
+        return total_loss, aux_metrics
+
+    raise ValueError(f"Unsupported loss_strategy: {loss_strategy}")
+
+def compute_prediction_losses(y_pred_flat: torch.Tensor, true_demand_tensor: torch.Tensor):
+    """
+    计算更稳健的预测损失，并保留原始 MSE 作为对照监控指标。
+
+    说明:
+        pred_loss: 训练时实际使用的 log1p + Huber 损失，降低长尾样本对梯度的冲击
+        raw_mse_loss: 原始需求空间上的 MSE，仅用于观测模型是否仍受极端值影响
+    """
+    safe_true_demand = true_demand_tensor.clamp_min(0.0)
+    pred_log = torch.log1p(y_pred_flat)
+    true_log = torch.log1p(safe_true_demand)
+    pred_loss = F.huber_loss(pred_log, true_log, delta=1.0)
+    raw_mse_loss = F.mse_loss(y_pred_flat, safe_true_demand)
+    return pred_loss, raw_mse_loss
 
 def train_predict_and_optimize(
     dataloader, 
@@ -16,7 +63,11 @@ def train_predict_and_optimize(
     epochs: int = 10,
     device: torch.device = torch.device('cpu'),
     report_to: str = "wandb",
-    exp_name: str = "8008"
+    exp_name: str = "8008",
+    learning_rate: float = 1e-5,
+    loss_strategy: str = "balanced_sum",
+    loss_alpha: float = 0.5,
+    grad_clip_norm: float = 1.0
 ):
     """
     [Step 6] 端到端 Predict-and-Optimize 训练循环 (C同学负责)
@@ -25,14 +76,24 @@ def train_predict_and_optimize(
     use_wandb = (report_to.lower() == "wandb")
     if use_wandb:
         import wandb
-        wandb.init(project=exp_name, name=f"run_epo{epochs}_bs{dataloader.batch_size}")
+        wandb.init(
+            project=exp_name,
+            name=f"run_epo{epochs}_bs{dataloader.batch_size}_{loss_strategy}_lr{learning_rate:.0e}"
+        )
         
-    optimizer = Adam(predictor.parameters(), lr=1e-3)
+    # 降低学习率，防止在剧烈波动的梯度中“翻车”
+    optimizer = Adam(predictor.parameters(), lr=learning_rate)
     
     # 历史缓冲池，用于训练 Surrogate Model
     history_y_pred = []
     history_context = []
     history_true_cost = []
+    
+    # 记录上次训练代理模型时的损失表面，避免频繁重建
+    surrogate_update_freq = 200
+    ema_total_loss = None
+    ema_cost_loss = None
+    ema_pred_loss = None
     
     for epoch in range(epochs):
         for batch_idx, (features, category_idx, true_demand, cost_params_dict) in enumerate(dataloader):
@@ -64,8 +125,10 @@ def train_predict_and_optimize(
                     # 为了应对 DataLoader 批量合并出来的 tensor/list，进行安全提取
                     def safe_extract(key, default_val):
                         val = cost_params_dict.get(key, [default_val] * len(y_pred_np))
-                        if isinstance(val, list): return val[i]
-                        if isinstance(val, torch.Tensor): return val[i].item()
+                        if isinstance(val, list):
+                            return val[i]
+                        if isinstance(val, torch.Tensor):
+                            return val[i].item()
                         return val
                     
                     cp = SKUCostParams(
@@ -110,18 +173,18 @@ def train_predict_and_optimize(
             # ==========================================================
             # [Step 5 & 6] 代理模型拟合与反向传播 (C)
             # ==========================================================
-            # 每隔一定的 batch 训练/更新一次 Surrogate Model (Burn-in 阶段)
-            if len(history_y_pred) >= 128 and batch_idx % 10 == 0:
+            # 每隔 200 个 batch 才更新一次 Surrogate Model (防止目标函数频繁漂移导致神经网络梯度崩溃)
+            if len(history_y_pred) >= 1000 and batch_idx % surrogate_update_freq == 0:
                 surrogate.train_surrogate(
                     np.array(history_y_pred), 
                     np.array(history_context), 
                     np.array(history_true_cost)
                 )
                 
-                # 保留滑动窗口，丢弃太旧的探索数据
-                history_y_pred = history_y_pred[-1000:]
-                history_context = history_context[-1000:]
-                history_true_cost = history_true_cost[-1000:]
+                # 大幅扩大滑动窗口，让代理模型有足够长期的记忆，防止灾难性遗忘
+                history_y_pred = history_y_pred[-20000:]
+                history_context = history_context[-20000:]
+                history_true_cost = history_true_cost[-20000:]
                 
             if surrogate.is_trained:
                 # 关键步骤：使用自定义的 Autograd Function 桥接 PyTorch 和 LightGBM
@@ -129,23 +192,63 @@ def train_predict_and_optimize(
                 context_tensor = torch.tensor(context_np, dtype=torch.float32, device=device)
                 cost_tensor = SurrogateAutogradFunction.apply(y_pred_tensor, context_tensor, surrogate)
                 
-                # 我们的终极目标是最小化业务成本，而不是 MSE
-                loss = cost_tensor.mean()
+                # 计算基于端到端决策的业务成本损失
+                cost_loss = cost_tensor.mean()
+                
+                # 使用对长尾需求更稳健的 log1p + Huber 作为预测误差损失。
+                true_demand_tensor = true_demand.to(device).view(-1)
+                y_pred_flat = y_pred_tensor.view(-1)
+                pred_loss, raw_mse_loss = compute_prediction_losses(y_pred_flat, true_demand_tensor)
+                
+                # 将业务成本损失和预测损失拆开构造，便于切换训练方案和单独监控。
+                total_loss, aux_metrics = build_total_loss(
+                    cost_loss=cost_loss,
+                    pred_loss=pred_loss,
+                    loss_strategy=loss_strategy,
+                    loss_alpha=loss_alpha
+                )
                 
                 # 反向传播 (更新 A同学 的神经网络)
-                loss.backward()
+                total_loss.backward()
+                clip_grad_norm_(predictor.parameters(), max_norm=grad_clip_norm)
                 optimizer.step()
+
+                if ema_total_loss is None:
+                    ema_total_loss = total_loss.item()
+                    ema_cost_loss = cost_loss.item()
+                    ema_pred_loss = pred_loss.item()
+                else:
+                    ema_total_loss = 0.95 * ema_total_loss + 0.05 * total_loss.item()
+                    ema_cost_loss = 0.95 * ema_cost_loss + 0.05 * cost_loss.item()
+                    ema_pred_loss = 0.95 * ema_pred_loss + 0.05 * pred_loss.item()
                 
-                if batch_idx % 10 == 0:
-                    print(f"Epoch {epoch} | Batch {batch_idx} | Surrogate Loss (True Cost): {loss.item():.2f}")
+                if batch_idx % 50 == 0:
+                    # 提取并打印 surrogate_grad 的绝对值均值 (Mean Abs Grad)
+                    mean_grad = getattr(surrogate, 'last_mean_abs_grad', 0.0)
+                    print(
+                        f"Epoch {epoch} | Batch {batch_idx} | Total Loss: {total_loss.item():.4f} "
+                        f"| Cost Loss: {cost_loss.item():.4f} | Pred Loss: {pred_loss.item():.4f} "
+                        f"| Raw MSE: {raw_mse_loss.item():.4f} | EMA Total: {ema_total_loss:.4f} "
+                        f"| Mean Abs Grad: {mean_grad:.4f} | Strategy: {loss_strategy}"
+                    )
                     
                 if use_wandb:
+                    mean_grad = getattr(surrogate, 'last_mean_abs_grad', 0.0)
                     wandb.log({
                         "epoch": epoch,
                         "batch": batch_idx,
-                        "surrogate_loss": loss.item(),
+                        "total_loss": total_loss.item(),
+                        "cost_loss": cost_loss.item(),
+                        "pred_loss": pred_loss.item(),
+                        "mse_loss": raw_mse_loss.item(),
+                        "scaled_cost_loss": aux_metrics["scaled_cost_loss"].item(),
+                        "scaled_pred_loss": aux_metrics["scaled_pred_loss"].item(),
+                        "ema_total_loss": ema_total_loss,
+                        "ema_cost_loss": ema_cost_loss,
+                        "ema_pred_loss": ema_pred_loss,
                         "mean_true_cost": true_costs_np.mean(),
-                        "mean_y_pred": y_pred_np.mean()
+                        "mean_y_pred": y_pred_np.mean(),
+                        "mean_abs_grad": mean_grad
                     })
             else:
                 if batch_idx % 10 == 0:

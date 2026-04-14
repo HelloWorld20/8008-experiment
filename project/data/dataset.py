@@ -10,12 +10,35 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from interfaces import SKUCostParams
 from data.category import compute_adi, compute_cv2, classify_type
 
+# 历史窗口长度: 使用过去 28 天销量序列来预测下一天需求。
+HISTORY_WINDOW_DAYS = 28
+
+# ==============================================================================
+# 全局业务成本参数配置 (Baseline 设定)
+# ==============================================================================
+# 利润率 (Margin Rate): 用于从真实售价推算进货成本。35% 意味着进价是售价的 65%
+PROFIT_MARGIN_RATE = 0.35
+
+# 年库存成本率 (Annual Holding Cost Rate): 每年存放一件商品的成本占其进货价的比例
+# 在数据加载时会被转换为周成本 (除以 52)
+ANNUAL_HOLDING_COST_RATE = 0.20
+
+# 固定订货成本 (Fixed Ordering Cost): 每次发起采购订单的固定物流/人工成本
+FIXED_ORDERING_COST = 5.0
+
+# 缺货惩罚乘数 (Stockout Penalty Multiplier): 
+# 严格的 Baseline 缺货成本仅等于丢失的毛利。
+# 但在端到端模型中，为了防止模型因为进货风险高而完全不进货(预测全为0)，
+# 我们允许在此处人为放大缺货惩罚(加上声誉损失)。设为 0.0 即代表严格对齐 Baseline。
+REPUTATION_PENALTY_MULTIPLIER = 10.0
+# ==============================================================================
+
 class M5InventoryDataset(Dataset):
     """
     M5 沃尔玛库存数据集加载器
     负责读取特征并返回: (features, true_demand, cost_params)
     """
-    def __init__(self, data_path: str, mode: str = 'train', seq_len: int = 28, penalty_coef: float = 10.0):
+    def __init__(self, data_path: str, mode: str = 'train', seq_len: int = HISTORY_WINDOW_DAYS, penalty_coef: float = 10.0):
         """
         Args:
             data_path: dataset 文件夹路径 (例如: '../dataset')
@@ -96,32 +119,32 @@ class M5InventoryDataset(Dataset):
         feature_end_idx = self.target_day_idx
         feature_cols = [f'd_{i}' for i in range(feature_start_idx + 1, feature_end_idx + 1)]
         
-        # 转为 numpy 数组并转换为 tensor
+        # 将过去 28 天销量重塑为真正的时间序列: (seq_len,) -> (seq_len, 1)
         features_np = row[feature_cols].values.astype(np.float32)
-        features = torch.tensor(features_np, dtype=torch.float32)
+        features = torch.tensor(features_np, dtype=torch.float32).unsqueeze(-1)
         
         # 2. 提取真实需求 (目标天的销量)
         target_col = f'd_{self.target_day_idx + 1}'
         true_demand_np = np.float32(row[target_col])
         true_demand = torch.tensor([true_demand_np], dtype=torch.float32)
         
-        # 3. 构造业务成本参数 (模拟计算逻辑)
-        # 获取该 SKU 在该门店的历史平均价格
-        p_i = self.avg_prices.get((item_id, store_id), 5.0)
+        # 3. 构造业务成本参数 (基于 Baseline 的统一设定)
+        # 获取该 SKU 在该门店的历史平均价格 (作为售价)
+        sell_price = self.avg_prices.get((item_id, store_id), 5.0)
         
-        # 假设持仓成本是采购价的 20% / 52周
-        c_h = p_i * 0.20 / 52.0
+        # 进货价(成本) = 售价 * (1 - 利润率)
+        p_i = sell_price * (1 - PROFIT_MARGIN_RATE)
         
-        # 方案A修改：大幅提高缺货成本 (c_u) 
-        # 原来是: c_u = sell_price - p_i (即售价减去进价的毛利，可能太低导致模型选择不进货)
-        # 现在修改为：缺货成本不仅包含丢失的毛利，还包含巨大的声誉惩罚（基于售价的 penalty_coef 倍数）
-        sell_price = p_i * 1.5
+        # 持仓成本 = (进货价 * 年库存成本率) / 52周
+        c_h = p_i * ANNUAL_HOLDING_COST_RATE / 52.0
+        
+        # 缺货成本(c_u): 卖不出去损失的利润 + 人为加上的声誉惩罚 (默认=0，即严格 Baseline)
         lost_margin = sell_price - p_i
-        reputation_penalty = sell_price * self.penalty_coef
+        reputation_penalty = sell_price * REPUTATION_PENALTY_MULTIPLIER
         c_u = lost_margin + reputation_penalty
         
-        # 假设固定订货成本为 10.0
-        c_f = 10.0
+        # 固定订货成本
+        c_f = FIXED_ORDERING_COST
         
         # 假设体积 v_i 根据类别简单映射
         v_i = 1.0
@@ -144,7 +167,13 @@ class M5InventoryDataset(Dataset):
         
         return features, category_idx, true_demand, cost_params
 
-def get_dataloader(data_path: str, batch_size: int = 32, mode: str = 'train', penalty_coef: float = 10.0) -> DataLoader:
+def get_dataloader(
+    data_path: str,
+    batch_size: int = 32,
+    mode: str = 'train',
+    penalty_coef: float = 10.0,
+    seq_len: int = HISTORY_WINDOW_DAYS
+) -> DataLoader:
     """
     获取 DataLoader
     为了避免在单测中加载整个真实数据集太慢，如果在 data_path 找不到真实文件，
@@ -164,6 +193,6 @@ def get_dataloader(data_path: str, batch_size: int = 32, mode: str = 'train', pe
     if not os.path.exists(sales_path):
         raise FileNotFoundError(f"【严重错误】未找到真实数据集文件: {sales_path}。请确保已下载并放置了正确的 M5 数据集 (sales_train_evaluation.csv 等)。")
 
-    dataset = M5InventoryDataset(data_path, mode=mode, penalty_coef=penalty_coef)
+    dataset = M5InventoryDataset(data_path, mode=mode, seq_len=seq_len, penalty_coef=penalty_coef)
         
     return DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate)
